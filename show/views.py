@@ -11,6 +11,7 @@ import PIL
 import torch
 from diffusers import DiffusionPipeline
 from diffusers import StableDiffusionInpaintPipeline
+from diffusers import StableDiffusionPipeline
 import io
 from PIL import Image, ImageDraw
 from PIL import ImageCms
@@ -38,9 +39,25 @@ pipe = StableDiffusionInpaintPipeline.from_pretrained(
     torch_dtype=torch.float16,
 ).to(device)
 
+# pipe = StableDiffusionPipeline.from_pretrained(
+#     "stabilityai/stable-diffusion-2",
+#     torch_dtype=torch.float16,
+# ).to(device)
+
+def image_padding(image):
+    # image paading
+    new_size = max(image.width, image.height)
+    image_padded = Image.new(image.mode, (new_size, new_size), (0, 0, 0))
+    left_pad = (int)((new_size-image.width)/2)
+    top_pad = (int)((new_size-image.height)/2)
+    image_padded.paste(image, (left_pad, top_pad))
+    return (image_padded, left_pad, top_pad)
+
 @csrf_exempt
 def index(request):
     if request.method == "POST":
+        logger.debug('---showonme-image processing started')
+
         data = json.loads(request.body.decode())
         image_base64 = data['originImage'].replace("data:image/png;base64,", "")
         image_base64 = image_base64.replace("data:image/jpeg;base64,", "")
@@ -52,92 +69,69 @@ def index(request):
             return JsonResponse({'response_code':False})
             # return HttpResponse("PIL.UnidentifiedImageError")
         
-        logger.debug('---showonme-step2')
         init_img.save('init.png')
 
         # change percent to pixel
-        data['cropRect']['x'] = init_img.width * data['cropRect']['x'] / 100
-        data['cropRect']['y'] = init_img.height * data['cropRect']['y'] / 100
-        data['cropRect']['width'] = init_img.width * data['cropRect']['width'] / 100
-        data['cropRect']['height'] = init_img.height * data['cropRect']['height'] / 100
+        data['cropRect']['x'] = int(init_img.width * data['cropRect']['x'] / 100)
+        data['cropRect']['y'] = int(init_img.height * data['cropRect']['y'] / 100)
+        data['cropRect']['width'] = int(init_img.width * data['cropRect']['width'] / 100)
+        data['cropRect']['height'] = int(init_img.height * data['cropRect']['height'] / 100)
 
-        # image paading
-        new_size = max(init_img.width, init_img.height)
-        init_img_padded = Image.new(init_img.mode, (new_size, new_size), (255, 255, 255))
-        left_pad = (int)((new_size-init_img.width)/2)
-        top_pad = (int)((new_size-init_img.height)/2)
-        right_pad = left_pad + init_img.width
-        bottom_pad = top_pad + init_img.height
-        init_img_padded.paste(init_img, (left_pad, top_pad))
-        init_img_padded.save('init_img_padded.png')
-        init_img = init_img_padded
+        crop_padding = 32
+        crop_region = {}
+        crop_region['x1'] = (int)(max(data['cropRect']['x'] - crop_padding, 0))
+        crop_region['y1'] = (int)(max(data['cropRect']['y'] - crop_padding, 0))
+        crop_region['x2'] = (int)(min(data['cropRect']['x'] + data['cropRect']['width'] + crop_padding, init_img.width))
+        crop_region['y2'] = (int)(min(data['cropRect']['y'] + data['cropRect']['height'] + crop_padding, init_img.height))
+        print('crop_region')
+        print(crop_region)
 
-        # create mask image
-        img_mask = Image.new("RGB", (init_img.width, init_img.height), (0, 0, 0))
-        img_draw = ImageDraw.Draw(img_mask)
-        w, h = data['cropRect']['width'], data['cropRect']['height']
-        w = int(w)
-        h = int(h)
-        x = data['cropRect']['x'] + left_pad
-        y = data['cropRect']['y'] + top_pad
+        crop_image = init_img.crop(tuple(crop_region.values()))
+        crop_image.save('crop_image.png')
+        emebed_size = max(crop_image.width, crop_image.height)
+
+        # mask_image = Image.new("RGB", (crop_image.width, crop_image.height), (255, 255, 255))
+        mask_image = Image.new("RGB", (init_img.width, init_img.height), (0, 0, 0))
+        img_draw = ImageDraw.Draw(mask_image)
+        w, h = int(data['cropRect']['width']), int(data['cropRect']['height'])
+        x = data['cropRect']['x']
+        y = data['cropRect']['y']
         shape = [(x, y), (x+w, y+h)]
-        print(data['cropRect'])
-        print(shape)
         img_draw.rectangle(shape, fill ="#ffffff")
-        img_mask.save('mask.png')
+        mask_image = mask_image.crop(tuple(crop_region.values()))
+        mask_image.save('mask.png')
 
-        emebed_size = 512
+        crop_height=crop_image.height
+        crop_width=crop_image.width
+        crop_image, left_pad, top_pad = image_padding(crop_image)
+        mask_image, left_pad, top_pad = image_padding(mask_image)
+        crop_image.save('crop_padding.png')
+        mask_image.save('mask_padding.png')
+        padded_size = crop_image.width
+        crop_image = crop_image.convert("RGB").resize((512, 512))
+        mask_image = mask_image.convert("RGB").resize((512, 512))
 
-        x_ratio = emebed_size/init_img.width
-        y_ratio = emebed_size/init_img.height
-        margin = 0
-        left = abs(x*x_ratio - margin)
-        top = abs(y*y_ratio - margin)
-        right = min(left+w*x_ratio + margin, emebed_size)
-        bottom = min(top+h*y_ratio + margin, emebed_size)
+        output = pipe(prompt=data['prompt'], image=crop_image, mask_image=mask_image, num_inference_steps=30, guidance_scale=7.5, num_images_per_prompt=1, height=512, width=512)
+        result_image = output.images[0]
+        result_image.save('result.png')
 
-        init_img = init_img.convert("RGB").resize((emebed_size, emebed_size))
-        img_mask = img_mask.convert("RGB").resize((emebed_size, emebed_size))
-        init_img.save('init_resize.png')
-        img_mask.save('mask_resize.png')
-
-        pipe.safety_checker = lambda images, clip_input: (images, False)
-        # output = pipe(prompt=data['prompt'], image=init_img, mask_image=img_mask, num_inference_steps=15, guidance_scale=7.5, num_images_per_prompt=1)
-        # output = pipe(prompt=data['prompt'], image=init_img, mask_image=img_mask, num_inference_steps=100, guidance_scale=11, num_images_per_prompt=1)
-        output = pipe(prompt=data['prompt'], image=init_img, mask_image=img_mask, num_inference_steps=15, guidance_scale=7.5, num_images_per_prompt=1, height=emebed_size, width=emebed_size)
-        output.images[0].save('result.png')
-
-        logger.debug('---showonme-step5')
+        result_image = result_image.convert("RGB").resize((padded_size, padded_size))
+        result_image = result_image.crop((left_pad, top_pad, left_pad+crop_width, top_pad+crop_height))
+        edge_padding = 1
+        result_image = result_image.crop((edge_padding, edge_padding, result_image.width-edge_padding, result_image.height-edge_padding))
         result_filename = str(random.randint(0,10000))+'.png'
-        output.images[0].crop((left, top, right, bottom)).save('build/image/'+result_filename)
+        result_image.save('build/image/'+result_filename)
+        result_image.save('result_crop.png')
 
-        result_image_total = output.images[0].crop((left_pad*x_ratio, top_pad*y_ratio, right_pad*x_ratio, bottom_pad*y_ratio))
-
-        # image_io_0 = BytesIO()
-        # output.images[0].save(image_io_0, 'PNG')
-        # dataurl_0 = 'data:image/png;base64,' + b64encode(image_io_0.getvalue()).decode('ascii')
-        # image_io_1 = BytesIO()
-        # output.images[1].save(image_io_1, 'PNG')
-        # dataurl_1 = 'data:image/png;base64,' + b64encode(image_io_1.getvalue()).decode('ascii')
-        # image_io_2 = BytesIO()
-        # output.images[2].save(image_io_2, 'PNG')
-        # dataurl_2 = 'data:image/png;base64,' + b64encode(image_io_2.getvalue()).decode('ascii')
-        # response = {"data_url":[dataurl_0, dataurl_1, dataurl_2], "result_filename":result_filename}
-
-        # image_io = BytesIO()
-        # output.images[0].save(image_io, 'PNG')
-        # dataurl = 'data:image/png;base64,' + b64encode(image_io.getvalue()).decode('ascii')
-        # response = {"data_url":dataurl, "result_filename":result_filename}
+        init_img.paste(result_image, (crop_region['x1']+edge_padding, crop_region['y1']+edge_padding))
 
         image_io = BytesIO()
-        result_image_total.save(image_io, 'PNG')
+        init_img.save(image_io, 'PNG')
         dataurl = 'data:image/png;base64,' + b64encode(image_io.getvalue()).decode('ascii')
         response = {"data_url":dataurl, "result_filename":result_filename}
         
+        logger.debug('---showonme-image processing finished')
         return HttpResponse(json.dumps(response), content_type="application/json")
-
-    else:
-        return HttpResponse("APIs for ShowOnMe are running!")
 
 @csrf_exempt
 def get_images(request):
