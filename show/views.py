@@ -111,7 +111,7 @@ def index(request):
         crop_image = crop_image.convert("RGB").resize((512, 512))
         mask_image = mask_image.convert("RGB").resize((512, 512))
 
-        output = pipe(prompt=data['prompt'], image=crop_image, mask_image=mask_image, num_inference_steps=30, guidance_scale=7.5, num_images_per_prompt=1, height=512, width=512)
+        output = pipe(prompt=data['prompt'], image=crop_image, mask_image=mask_image, num_inference_steps=50, guidance_scale=7.5, num_images_per_prompt=1, height=512, width=512)
         result_image = output.images[0]
         result_image.save('result.png')
 
